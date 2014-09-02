@@ -10,6 +10,9 @@
 .container {
   @include container-fixed();
 
+  @media (min-width: $screen-ms-min) {
+    width: $container-ms;
+  }
   @media (min-width: $screen-sm-min) {
     width: $container-sm;
   }
@@ -54,6 +57,15 @@
 // smartphones.
 
 @include make-grid(xs);
+
+
+// Mid-Small grid
+//
+// An additional set of breakpoints to target sizes in between 'xs' and 'sm'
+ 
+@media (min-width: $screen-ms-min) {
+  @include make-grid(ms);
+}
 
 
 // Small grid
