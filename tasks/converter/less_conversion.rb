@@ -79,7 +79,7 @@ class Converter
             file = deinterpolate_vararg_mixins(file)
           when 'mixins/vendor-prefixes.less'
             # remove second scale mixins as this is handled via vararg in the first one
-            file = replace_rules(file, '.scale(@ratioX; @ratioY)') {}
+            file = replace_rules(file, Regexp.escape('@mixin scale($ratioX, $ratioY...)')) { '' }
           when 'mixins/grid-framework.less'
             file = convert_grid_mixins file
           when 'component-animations.less'
@@ -88,13 +88,16 @@ class Converter
             file = apply_mixin_parent_selector file, '\.(?:visible|hidden)'
           when 'variables.less'
             file = insert_default_vars(file)
-            file = unindent <<-SCSS + file, 14
-              // a flag to toggle asset pipeline / compass integration
-              // defaults to true if twbs-font-path function is present (no function => twbs-font-path('') parsed as string == right side)
-              // in Sass 3.3 this can be improved with: function-exists(twbs-font-path)
-              $bootstrap-sass-asset-helper: (twbs-font-path("") != unquote('twbs-font-path("")')) !default;
+            file = unindent <<-SCSS + "\n" + file, 14
+              // When true, asset path helpers are used, otherwise the regular CSS `url()` is used.
+              // When there no function is defined, `fn('')` is parsed as string that equals the right hand side
+              // NB: in Sass 3.3 there is a native function: function-exists(twbs-font-path)
+              $bootstrap-sass-asset-helper: #{sass_fn_exists('twbs-font-path')} !default;
             SCSS
-            file = replace_all file, /(\$icon-font-path:).*(!default)/, '\1 "bootstrap/" \2'
+            file = replace_all file, %r{(\$icon-font-path): \s*"(.*)" (!default);},  "\n" + unindent(<<-SCSS, 14)
+              // [converter] Asset helpers such as Sprockets and Node.js Mincer do not resolve relative paths
+              \\1: if($bootstrap-sass-asset-helper, "bootstrap/", "\\2bootstrap/") \\3;
+            SCSS
           when 'close.less'
             # extract .close { button& {...} } rule
             file = extract_nested_rule file, 'button&'
@@ -111,8 +114,7 @@ class Converter
           when 'thumbnails.less', 'labels.less', 'badges.less'
             file = extract_nested_rule file, 'a&'
           when 'glyphicons.less'
-            file = bootstrap_font_files.map { |p| %Q(//= depend_on_asset "bootstrap/#{File.basename(p)}") } * "\n" + "\n" + file
-            file = replace_all file, /\#\{(url\(.*?\))}/, '\1'
+            file = bootstrap_font_files.map { |p| %Q(//= depend_on "bootstrap/#{File.basename(p)}") } * "\n" + "\n" + file
             file = replace_rules(file, '@font-face') { |rule|
               rule = replace_all rule, /(\$icon-font(?:-\w+)+)/, '#{\1}'
               replace_asset_url rule, :font
@@ -123,18 +125,17 @@ class Converter
             file = replace_all(file, "  @include bg-variant($brand-primary);\n}", "}\n@include bg-variant('.bg-primary', $brand-primary);")
         end
 
-        name    = name.sub(/\.less$/, '.scss')
-        path    = File.join save_to, name
-        unless name == 'bootstrap.scss'
-          path = File.join File.dirname(path), '_' + File.basename(path)
-        end
+        path = File.join save_to, name.sub(/\.less$/, '.scss')
+        path = File.join File.dirname(path), '_' + File.basename(path)
         save_file(path, file)
         log_processed File.basename(path)
       end
 
-      # generate imports valid relative to both load path and file directory
-      save_file File.expand_path("#{save_to}/../bootstrap.scss"),
-                File.read("#{save_to}/bootstrap.scss").gsub(/ "/, ' "bootstrap/')
+      # move bootstrap/_bootstrap.scss to _bootstrap.scss adjusting import paths
+      main_from = "#{save_to}/_bootstrap.scss"
+      main_to   = File.expand_path("#{save_to}/../_bootstrap.scss")
+      save_file main_to, File.read(main_from).gsub(/ "/, ' "bootstrap/')
+      File.delete(main_from)
     end
 
     def bootstrap_less_files
@@ -161,6 +162,10 @@ class Converter
       file
     end
 
+    def sass_fn_exists(fn)
+      %Q{(#{fn}("") != unquote('#{fn}("")'))}
+    end
+
     def replace_asset_url(rule, type)
       replace_all rule, /url\((.*?)\)/, "url(if($bootstrap-sass-asset-helper, twbs-#{type}-path(\\1), \\1))"
     end
@@ -168,13 +173,17 @@ class Converter
     # convert recursively evaluated selector $list to @for loop
     def mixin_all_grid_columns(css, selector: raise('pass class'), from: 1, to: raise('pass to'))
       mxn_def = css.each_line.first.strip
+      # inject local variables as default arguments
+      # this is to avoid overwriting outer variables with the same name with Sass <= 3.3
+      # see also: https://github.com/twbs/bootstrap-sass/issues/636
+      locals = <<-SASS.strip
+        $i: #{from}, $list: "#{selector}"
+      SASS
+      mxn_def.sub!(/(\(?)(\)\s*\{)/) {  "#{$1}#{', ' if $1.empty?}#{locals}#{$2}" }
       step_body = (css =~ /\$list \{\n(.*?)\n[ ]*\}/m) && $1
 <<-SASS
 // [converter] This is defined recursively in LESS, but Sass supports real loops
 #{mxn_def}
-  $list: '';
-  $i: #{from};
-  $list: "#{selector}";
   @for $i from (#{from} + 1) through #{to} {
     $list: "\#{$list}, #{selector}";
   }
